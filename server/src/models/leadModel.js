@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS leads (
   name VARCHAR(120) NULL,
   source VARCHAR(80) NOT NULL DEFAULT 'unknown',
   status VARCHAR(40) NOT NULL DEFAULT 'new',
-  assigned_to VARCHAR(120) NULL,
+  assigned_to_id INT UNSIGNED NULL,
   notes TEXT NULL,
   follow_up_at DATETIME NULL,
   last_call_outcome VARCHAR(255) NULL,
@@ -18,13 +18,23 @@ CREATE TABLE IF NOT EXISTS leads (
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   INDEX idx_status (status),
-  INDEX idx_assigned_to (assigned_to),
+  INDEX idx_assigned_to (assigned_to_id),
   INDEX idx_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 `;
 
 async function ensureLeadTable() {
   await pool.query(CREATE_LEADS_TABLE_SQL);
+  // Optional: Add column if it doesn't exist (Migration)
+  try {
+    const [columns] = await pool.query("SHOW COLUMNS FROM leads LIKE 'assigned_to_id'");
+    if (columns.length === 0) {
+      await pool.query("ALTER TABLE leads ADD COLUMN assigned_to_id INT UNSIGNED NULL AFTER status");
+      await pool.query("ALTER TABLE leads ADD INDEX idx_assigned_to (assigned_to_id)");
+    }
+  } catch (err) {
+    console.warn("Migration check failed:", err.message);
+  }
 }
 
 async function upsertLead(lead, rawPayload) {
@@ -35,8 +45,12 @@ async function upsertLead(lead, rawPayload) {
     ) VALUES (?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
       name = COALESCE(?, name),
-      last_message = COALESCE(?, last_message),
-      last_message_at = COALESCE(?, last_message_at),
+      status = CASE 
+        WHEN status = 'new' THEN ? 
+        ELSE status 
+      END,
+      last_message = ?,
+      last_message_at = ?,
       raw_payload = ?,
       updated_at = CURRENT_TIMESTAMP
   `;
@@ -49,35 +63,38 @@ async function upsertLead(lead, rawPayload) {
     lead.lastMessage,
     lead.lastMessageAt,
     payloadJson,
+    // For Update:
     lead.name,
+    lead.status, // Only updates if old status was 'new'
     lead.lastMessage,
     lead.lastMessageAt,
     payloadJson,
   ];
 
-  await pool.query(sql, params);
+  const [result] = await pool.query(sql, params);
+  
+  // Return the lead ID
+  if (result.insertId) return result.insertId;
+  
+  const [rows] = await pool.query("SELECT id FROM leads WHERE phone = ?", [lead.phone]);
+  return rows[0].id;
 }
 
 async function getLeadById(id) {
   const [rows] = await pool.query(
     `
       SELECT
-        id,
-        phone,
-        name,
-        source,
-        status,
-        assigned_to AS assignedTo,
-        notes,
-        follow_up_at AS followUpAt,
-        last_call_outcome AS lastCallOutcome,
-        last_called_at AS lastCalledAt,
-        last_message AS lastMessage,
-        last_message_at AS lastMessageAt,
-        created_at AS createdAt,
-        updated_at AS updatedAt
-      FROM leads
-      WHERE id = ?
+        l.id, l.phone, l.name, l.source, l.status, l.assigned_to_id, l.notes, l.raw_payload,
+        l.last_message AS lastMessage,
+        l.last_message_at AS lastMessageAt,
+        l.last_call_outcome AS lastCallOutcome,
+        l.last_called_at AS lastCalledAt,
+        l.follow_up_at AS followUpAt,
+        l.created_at, l.updated_at,
+        u.name AS assignedToName
+      FROM leads l
+      LEFT JOIN users u ON l.assigned_to_id = u.id
+      WHERE l.id = ?
       LIMIT 1
     `,
     [id]
@@ -85,45 +102,40 @@ async function getLeadById(id) {
   return rows[0] || null;
 }
 
-async function getAllLeads({ status, assignedTo, search, limit = 100 }) {
+async function getAllLeads({ status, assignedToId, search, limit = 100 }) {
   let sql = `
     SELECT
-      id,
-      phone,
-      name,
-      source,
-      status,
-      assigned_to AS assignedTo,
-      notes,
-      follow_up_at AS followUpAt,
-      last_call_outcome AS lastCallOutcome,
-      last_called_at AS lastCalledAt,
-      last_message AS lastMessage,
-      last_message_at AS lastMessageAt,
-      created_at AS createdAt,
-      updated_at AS updatedAt
-    FROM leads
+      l.id, l.phone, l.name, l.source, l.status, l.assigned_to_id, l.notes, l.raw_payload,
+      l.last_message AS lastMessage,
+      l.last_message_at AS lastMessageAt,
+      l.last_call_outcome AS lastCallOutcome,
+      l.last_called_at AS lastCalledAt,
+      l.follow_up_at AS followUpAt,
+      l.created_at, l.updated_at,
+      u.name AS assignedToName
+    FROM leads l
+    LEFT JOIN users u ON l.assigned_to_id = u.id
     WHERE 1 = 1
   `;
   const params = [];
 
   if (status) {
-    sql += " AND status = ?";
+    sql += " AND l.status = ?";
     params.push(status);
   }
 
-  if (assignedTo) {
-    sql += " AND assigned_to = ?";
-    params.push(assignedTo);
+  if (assignedToId) {
+    sql += " AND l.assigned_to_id = ?";
+    params.push(assignedToId);
   }
 
   if (search) {
     const like = `%${search}%`;
-    sql += " AND (phone LIKE ? OR name LIKE ? OR notes LIKE ?)";
+    sql += " AND (l.phone LIKE ? OR l.name LIKE ? OR l.notes LIKE ?)";
     params.push(like, like, like);
   }
 
-  sql += " ORDER BY created_at DESC LIMIT ?";
+  sql += " ORDER BY l.created_at DESC LIMIT ?";
   params.push(limit);
 
   const [rows] = await pool.query(sql, params);
@@ -144,21 +156,7 @@ async function updateLead(id, updates, params) {
 
 async function findLeadByPhone(phone) {
   const [rows] = await pool.query(
-    `
-      SELECT
-        id, phone, name, source, status,
-        assigned_to AS assignedTo, notes,
-        follow_up_at AS followUpAt,
-        last_call_outcome AS lastCallOutcome,
-        last_called_at AS lastCalledAt,
-        last_message AS lastMessage,
-        last_message_at AS lastMessageAt,
-        created_at AS createdAt,
-        updated_at AS updatedAt
-      FROM leads
-      WHERE phone = ?
-      LIMIT 1
-    `,
+    "SELECT * FROM leads WHERE phone = ? LIMIT 1",
     [phone]
   );
   return rows[0] || null;

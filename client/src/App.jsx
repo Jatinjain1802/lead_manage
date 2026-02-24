@@ -1,361 +1,219 @@
-import { useEffect, useMemo, useState } from "react";
-import "./App.css";
+import React, { useState } from 'react';
+import { BrowserRouter as Router, Routes, Route, Navigate, Link } from 'react-router-dom';
+import { AuthProvider, useAuth } from './context/AuthContext';
+import Login from './pages/Login';
+import LeadTable from './components/LeadTable';
+import ChatWindow from './components/ChatWindow';
+import UserManagement from './components/UserManagement';
+import Analytics from './components/Analytics';
+import { LayoutDashboard, Users, LogOut, ShieldCheck, Settings, BarChart3, Bell } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:5000";
+const SidebarItem = ({ active, icon: Icon, label, onClick }) => (
+  <button
+    onClick={onClick}
+    className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-300 group ${active
+        ? 'bg-blue-600/10 text-blue-500 border border-blue-600/20 shadow-[0_0_15px_rgba(37,99,235,0.1)]'
+        : 'hover:bg-slate-900/50 text-slate-400 hover:text-slate-200'
+      }`}
+  >
+    <Icon className={`w-5 h-5 transition-transform duration-300 ${active ? 'scale-110' : 'group-hover:scale-110'}`} />
+    <span className="font-medium text-sm">{label}</span>
+    {active && (
+      <motion.div
+        layoutId="sidebar-active"
+        className="ml-auto w-1.5 h-1.5 rounded-full bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.8)]"
+      />
+    )}
+  </button>
+);
 
-const STATUSES = [
-  "new",
-  "contacted",
-  "qualified",
-  "callback",
-  "not_interested",
-  "converted",
-];
+const Dashboard = () => {
+  const { user, logout } = useAuth();
+  const [selectedLead, setSelectedLead] = useState(null);
+  const [activeTab, setActiveTab] = useState('leads');
 
-function toDateTimeLocal(value) {
-  if (!value) return "";
-  const date = new Date(value);
-  const offsetMs = date.getTimezoneOffset() * 60000;
-  return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
-}
-
-function formatDate(value) {
-  if (!value) return "-";
-  return new Date(value).toLocaleString();
-}
-
-function App() {
-  const [leads, setLeads] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-  const [statusFilter, setStatusFilter] = useState("");
-  const [searchInput, setSearchInput] = useState("");
-  const [search, setSearch] = useState("");
-  const [drafts, setDrafts] = useState({});
-  const [savingId, setSavingId] = useState(null);
-  const [creating, setCreating] = useState(false);
-  const [newLead, setNewLead] = useState({
-    phone: "",
-    name: "",
-    message: "",
-  });
-
-  const queryString = useMemo(() => {
-    const params = new URLSearchParams();
-    if (statusFilter) params.set("status", statusFilter);
-    if (search) params.set("search", search);
-    return params.toString();
-  }, [statusFilter, search]);
-
-  const syncDrafts = (rows) => {
-    const nextDrafts = {};
-    for (const lead of rows) {
-      nextDrafts[lead.id] = {
-        name: lead.name || "",
-        status: lead.status || "new",
-        assignedTo: lead.assignedTo || "",
-        notes: lead.notes || "",
-        followUpAt: toDateTimeLocal(lead.followUpAt),
-        lastCallOutcome: lead.lastCallOutcome || "",
-      };
-    }
-    setDrafts(nextDrafts);
-  };
-
-  const loadLeads = async () => {
-    setLoading(true);
-    setError("");
-    try {
-      const response = await fetch(
-        `${API_BASE}/api/leads${queryString ? `?${queryString}` : ""}`
-      );
-      if (!response.ok) throw new Error("Unable to fetch leads");
-
-      const data = await response.json();
-      setLeads(data);
-      syncDrafts(data);
-    } catch (loadError) {
-      setError(loadError.message || "Unable to load leads");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadLeads();
-  }, [queryString]);
-
-  const updateDraft = (id, field, value) => {
-    setDrafts((current) => ({
-      ...current,
-      [id]: {
-        ...current[id],
-        [field]: value,
-      },
-    }));
-  };
-
-  const saveLead = async (id, markCalled = false) => {
-    const draft = drafts[id];
-    if (!draft) return;
-
-    setSavingId(id);
-    setError("");
-    try {
-      const response = await fetch(`${API_BASE}/api/leads/${id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: draft.name || null,
-          status: draft.status,
-          assignedTo: draft.assignedTo || null,
-          notes: draft.notes || null,
-          followUpAt: draft.followUpAt || null,
-          lastCallOutcome: draft.lastCallOutcome || null,
-          markCalled,
-        }),
-      });
-
-      if (!response.ok) throw new Error("Unable to save lead");
-      await loadLeads();
-    } catch (saveError) {
-      setError(saveError.message || "Unable to save lead");
-    } finally {
-      setSavingId(null);
-    }
-  };
-
-  const createManualLead = async (event) => {
-    event.preventDefault();
-    if (!newLead.phone.trim()) {
-      setError("Phone is required");
-      return;
-    }
-
-    setCreating(true);
-    setError("");
-    try {
-      const response = await fetch(`${API_BASE}/api/leads`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          phone: newLead.phone,
-          name: newLead.name || null,
-          message: newLead.message || null,
-          source: "manual_form",
-          status: "new",
-        }),
-      });
-
-      if (!response.ok) throw new Error("Unable to create lead");
-
-      setNewLead({ phone: "", name: "", message: "" });
-      await loadLeads();
-    } catch (createError) {
-      setError(createError.message || "Unable to create lead");
-    } finally {
-      setCreating(false);
+  const renderContent = () => {
+    switch (activeTab) {
+      case 'leads':
+        return (
+          <div className="max-w-7xl mx-auto space-y-8">
+            <div className="flex items-end justify-between">
+              <div>
+                <h3 className="text-3xl font-bold text-white tracking-tight">Lead Intelligence</h3>
+                <p className="text-slate-400 mt-1">Real-time WhatsApp traffic from your Meta advertising campaigns.</p>
+              </div>
+            </div>
+            <div className="grid grid-cols-1 gap-6">
+              <LeadTable onOpenChat={(lead) => setSelectedLead(lead)} />
+            </div>
+          </div>
+        );
+      case 'analytics':
+        return <Analytics />;
+      case 'users':
+        return <UserManagement />;
+      default:
+        return null;
     }
   };
 
   return (
-    <div className="page">
-      <header className="page-header">
-        <div>
-          <h1>Lead Management</h1>
-          <p>WhatsApp ad leads for sales follow-up</p>
-        </div>
-        <button type="button" className="button" onClick={loadLeads}>
-          Refresh
-        </button>
-      </header>
-
-      <section className="filters card">
-        <label>
-          Status
-          <select
-            value={statusFilter}
-            onChange={(event) => setStatusFilter(event.target.value)}
-          >
-            <option value="">All</option>
-            {STATUSES.map((status) => (
-              <option key={status} value={status}>
-                {status}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <label className="search-input">
-          Search
-          <input
-            value={searchInput}
-            onChange={(event) => setSearchInput(event.target.value)}
-            placeholder="Phone, name, or notes"
-          />
-        </label>
-
-        <button
-          type="button"
-          className="button"
-          onClick={() => setSearch(searchInput.trim())}
-        >
-          Apply
-        </button>
-      </section>
-
-      <section className="card">
-        <h2>Create test lead</h2>
-        <form className="create-form" onSubmit={createManualLead}>
-          <input
-            value={newLead.phone}
-            onChange={(event) =>
-              setNewLead((current) => ({ ...current, phone: event.target.value }))
-            }
-            placeholder="Phone (required)"
-            required
-          />
-          <input
-            value={newLead.name}
-            onChange={(event) =>
-              setNewLead((current) => ({ ...current, name: event.target.value }))
-            }
-            placeholder="Name"
-          />
-          <input
-            value={newLead.message}
-            onChange={(event) =>
-              setNewLead((current) => ({
-                ...current,
-                message: event.target.value,
-              }))
-            }
-            placeholder='First message, e.g. "Hi"'
-          />
-          <button type="submit" className="button" disabled={creating}>
-            {creating ? "Creating..." : "Add Lead"}
-          </button>
-        </form>
-      </section>
-
-      {error ? <p className="error">{error}</p> : null}
-
-      <section className="card table-card">
-        <h2>Leads</h2>
-        {loading ? (
-          <p>Loading leads...</p>
-        ) : (
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Phone</th>
-                  <th>Name</th>
-                  <th>Status</th>
-                  <th>Assigned To</th>
-                  <th>Notes</th>
-                  <th>Follow Up</th>
-                  <th>Call Outcome</th>
-                  <th>Last Message</th>
-                  <th>Called At</th>
-                  <th>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {leads.map((lead) => {
-                  const draft = drafts[lead.id] || {};
-                  const disabled = savingId === lead.id;
-                  return (
-                    <tr key={lead.id}>
-                      <td>{lead.phone}</td>
-                      <td>
-                        <input
-                          value={draft.name || ""}
-                          onChange={(event) =>
-                            updateDraft(lead.id, "name", event.target.value)
-                          }
-                        />
-                      </td>
-                      <td>
-                        <select
-                          value={draft.status || "new"}
-                          onChange={(event) =>
-                            updateDraft(lead.id, "status", event.target.value)
-                          }
-                        >
-                          {STATUSES.map((status) => (
-                            <option key={status} value={status}>
-                              {status}
-                            </option>
-                          ))}
-                        </select>
-                      </td>
-                      <td>
-                        <input
-                          value={draft.assignedTo || ""}
-                          onChange={(event) =>
-                            updateDraft(lead.id, "assignedTo", event.target.value)
-                          }
-                        />
-                      </td>
-                      <td>
-                        <input
-                          value={draft.notes || ""}
-                          onChange={(event) =>
-                            updateDraft(lead.id, "notes", event.target.value)
-                          }
-                        />
-                      </td>
-                      <td>
-                        <input
-                          type="datetime-local"
-                          value={draft.followUpAt || ""}
-                          onChange={(event) =>
-                            updateDraft(lead.id, "followUpAt", event.target.value)
-                          }
-                        />
-                      </td>
-                      <td>
-                        <input
-                          value={draft.lastCallOutcome || ""}
-                          onChange={(event) =>
-                            updateDraft(
-                              lead.id,
-                              "lastCallOutcome",
-                              event.target.value
-                            )
-                          }
-                        />
-                      </td>
-                      <td title={lead.lastMessage || ""}>{lead.lastMessage || "-"}</td>
-                      <td>{formatDate(lead.lastCalledAt)}</td>
-                      <td className="actions">
-                        <button
-                          type="button"
-                          className="button small"
-                          onClick={() => saveLead(lead.id, false)}
-                          disabled={disabled}
-                        >
-                          Save
-                        </button>
-                        <button
-                          type="button"
-                          className="button small secondary"
-                          onClick={() => saveLead(lead.id, true)}
-                          disabled={disabled}
-                        >
-                          Save + Called
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+    <div className="min-h-screen bg-[#020617] text-slate-200 flex overflow-hidden">
+      {/* Sidebar */}
+      <aside className="w-72 border-r border-slate-900 bg-[#020617] flex flex-col z-20">
+        <div className="p-8">
+          <div className="flex items-center gap-3 px-2">
+            <div className="p-2 bg-blue-600 rounded-lg shadow-lg shadow-blue-600/20">
+              <ShieldCheck className="text-white w-6 h-6" />
+            </div>
+            <h1 className="text-xl font-bold text-white tracking-tight">
+              LeadManage <span className="text-blue-500">AI</span>
+            </h1>
           </div>
-        )}
-      </section>
+        </div>
+
+        <nav className="flex-1 px-4 space-y-2">
+          <div className="text-[10px] font-bold text-slate-600 uppercase tracking-widest px-4 mb-2">Main Menu</div>
+          <SidebarItem
+            active={activeTab === 'leads'}
+            icon={LayoutDashboard}
+            label="Live Inbox"
+            onClick={() => setActiveTab('leads')}
+          />
+
+          {user?.role === 'admin' && (
+            <SidebarItem
+              active={activeTab === 'analytics'}
+              icon={BarChart3}
+              label="Analytics"
+              onClick={() => setActiveTab('analytics')}
+            />
+          )}
+
+          <div className="text-[10px] font-bold text-slate-600 uppercase tracking-widest px-4 mt-8 mb-2">Administration</div>
+          {user?.role === 'admin' && (
+            <SidebarItem
+              active={activeTab === 'users'}
+              icon={Users}
+              label="Team Intelligence"
+              onClick={() => setActiveTab('users')}
+            />
+          )}
+          <SidebarItem
+            active={activeTab === 'settings'}
+            icon={Settings}
+            label="Account Settings"
+            onClick={() => { }}
+          />
+        </nav>
+
+        <div className="p-4 mt-auto">
+          <div className="p-4 bg-slate-900/40 rounded-2xl border border-slate-800/50 mb-4">
+            <div className="flex items-center gap-3 mb-3">
+              <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-600 flex items-center justify-center font-bold text-white shadow-lg">
+                {user?.name.charAt(0)}
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="font-semibold text-sm text-white truncate">{user?.name}</div>
+                <div className="text-[10px] text-blue-500 font-bold tracking-wider uppercase">{user?.role}</div>
+              </div>
+            </div>
+            <button
+              onClick={logout}
+              className="w-full flex items-center justify-center gap-2 py-2.5 text-xs font-semibold text-slate-400 hover:text-red-400 hover:bg-red-400/10 rounded-xl transition-all duration-300"
+            >
+              <LogOut className="w-4 h-4" />
+              Sign Out
+            </button>
+          </div>
+        </div>
+      </aside>
+
+      {/* Main Content */}
+      <div className="flex-1 flex flex-col min-w-0 relative">
+        <header className="h-20 border-b border-slate-900 flex items-center justify-between px-8 bg-[#020617]/80 backdrop-blur-md sticky top-0 z-10 transition-all">
+          <div>
+            <h2 className="text-lg font-semibold text-white uppercase tracking-widest text-[11px]">
+              {activeTab === 'leads' ? 'Lead Intelligence' : activeTab === 'analytics' ? 'Performance Insights' : 'Team Directory'}
+            </h2>
+          </div>
+          <div className="flex items-center gap-6">
+            <button className="relative p-2 text-slate-400 hover:text-white transition-colors">
+              <Bell className="w-5 h-5" />
+              <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-blue-500 rounded-full border-2 border-[#020617]" />
+            </button>
+            <div className="h-8 w-[1px] bg-slate-800" />
+            <div className="bg-slate-900/80 px-4 py-2 rounded-xl flex items-center gap-3 border border-slate-800 shadow-xl shadow-blue-500/5">
+              <span className="flex h-2 w-2 relative">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
+              </span>
+              <span className="text-[10px] font-bold text-slate-300 tracking-widest uppercase">Node Live</span>
+            </div>
+          </div>
+        </header>
+
+        <main className="flex-1 p-8 overflow-y-auto bg-[radial-gradient(circle_at_top_right,rgba(37,99,235,0.05),transparent_40%)]">
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={activeTab}
+              initial={{ opacity: 0, scale: 0.98, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.98, y: -10 }}
+              transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
+            >
+              {renderContent()}
+            </motion.div>
+          </AnimatePresence>
+        </main>
+
+        <AnimatePresence>
+          {selectedLead && (
+            <>
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                onClick={() => setSelectedLead(null)}
+                className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40"
+              />
+              <ChatWindow
+                lead={selectedLead}
+                onClose={() => setSelectedLead(null)}
+                canSend={user?.canViewChat || user?.role === 'admin'}
+              />
+            </>
+          )}
+        </AnimatePresence>
+      </div>
     </div>
+  );
+};
+
+const PrivateRoute = ({ children }) => {
+  const { user, loading } = useAuth();
+  if (loading) return null;
+  return user ? children : <Navigate to="/login" />;
+};
+
+function App() {
+  return (
+    <AuthProvider>
+      <Router>
+        <Routes>
+          <Route path="/login" element={<Login />} />
+          <Route
+            path="/"
+            element={
+              <PrivateRoute>
+                <Dashboard />
+              </PrivateRoute>
+            }
+          />
+        </Routes>
+      </Router>
+    </AuthProvider>
   );
 }
 

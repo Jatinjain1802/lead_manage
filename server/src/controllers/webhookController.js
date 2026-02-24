@@ -1,9 +1,9 @@
 const leadModel = require("../models/leadModel");
+const messageModel = require("../models/messageModel");
 const { normalizePhone, getMessageText } = require("../utils/helpers");
+const { getNextAgentForAssignment } = require("../utils/assignment");
+const { emitToAll } = require("../utils/socket");
 
-/**
- * Normalizes WhatsApp payloads and extracts relevant lead info.
- */
 function parseWebhookLeads(payload) {
   const result = [];
   if (payload?.object !== "whatsapp_business_account") return result;
@@ -34,6 +34,7 @@ function parseWebhookLeads(payload) {
           name,
           lastMessage,
           lastMessageAt: new Date(timestampMs),
+          rawMessage: message,
         });
       }
     }
@@ -47,7 +48,7 @@ const verifyWebhook = (req, res) => {
   const challenge = req.query["hub.challenge"];
   const verifyToken = req.query["hub.verify_token"];
 
-  if (mode === "subscribe" && verifyToken === process.env.META_VERIFY_TOKEN) {
+  if (mode === "subscribe" && verifyToken === process.env.WHATSAPP_VERIFY_TOKEN) {
     return res.status(200).send(challenge);
   }
 
@@ -56,24 +57,75 @@ const verifyWebhook = (req, res) => {
 
 const handleWebhook = async (req, res) => {
   try {
-    const incomingLeads = parseWebhookLeads(req.body);
+    // Console log the raw payload for debugging
+    console.log("--- New Webhook Request ---");
+    console.log(JSON.stringify(req.body, null, 2));
 
-    if (!incomingLeads.length) {
-      return res.status(200).json({ received: true, processed: 0 });
+    const incomingLeads = parseWebhookLeads(req.body);
+    
+    if (incomingLeads.length > 0) {
+      console.log(`Parsed ${incomingLeads.length} leads from webhook.`);
+      console.log(incomingLeads);
     }
 
     for (const lead of incomingLeads) {
-      await leadModel.upsertLead(
-        {
-          phone: lead.phone,
-          name: lead.name,
-          source: "whatsapp_ad",
-          status: "new",
-          lastMessage: lead.lastMessage,
-          lastMessageAt: lead.lastMessageAt,
-        },
-        req.body
-      );
+      // 1. Check if lead already exists to see if it's "New" vs "Existing Chat"
+      const existingLead = await leadModel.findLeadByPhone(lead.phone);
+      
+      let leadId;
+      let assignedToId = null;
+
+      if (!existingLead) {
+        // NEW LEAD: Apply Round-Robin Assignment
+        assignedToId = await getNextAgentForAssignment();
+        
+        leadId = await leadModel.upsertLead(
+          {
+            phone: lead.phone,
+            name: lead.name,
+            source: "whatsapp_ad",
+            status: "new",
+            lastMessage: lead.lastMessage,
+            lastMessageAt: lead.lastMessageAt,
+          },
+          req.body
+        );
+
+        // Update with assignment
+        if (assignedToId) {
+          await leadModel.updateLead(leadId, ["assigned_to_id = ?"], [assignedToId]);
+        }
+      } else {
+        // EXISTING LEAD: Use existing assignment
+        leadId = existingLead.id;
+        await leadModel.upsertLead(
+          {
+            phone: lead.phone,
+            name: lead.name,
+            source: "whatsapp_ad",
+            status: existingLead.status, // Keep current status
+            lastMessage: lead.lastMessage,
+            lastMessageAt: lead.lastMessageAt,
+          },
+          req.body
+        );
+      }
+
+      // 2. Save Message to History
+      await messageModel.createMessage({
+        leadId,
+        senderType: 'customer',
+        messageText: lead.lastMessage,
+        messageType: lead.rawMessage?.type || 'text',
+        rawPayload: lead.rawMessage
+      });
+
+      // 3. Emit Real-time Notification via Socket
+      const updatedLead = await leadModel.getLeadById(leadId);
+      emitToAll("new_lead", {
+        lead: updatedLead,
+        isNew: !existingLead
+      });
     }
 
     return res.status(200).json({

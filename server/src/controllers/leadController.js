@@ -1,10 +1,11 @@
 const leadModel = require("../models/leadModel");
 const { LEAD_STATUSES } = require("../config/constants");
 const { normalizePhone } = require("../utils/helpers");
+const { emitToAll } = require("../utils/socket");
 
 const getLeads = async (req, res) => {
   try {
-    const { status, assignedTo, search } = req.query;
+    const { status, assignedToId, search } = req.query;
     const requestedLimit = Number(req.query.limit || 100);
     const limit = Number.isFinite(requestedLimit)
       ? Math.min(Math.max(requestedLimit, 1), 500)
@@ -20,8 +21,8 @@ const getLeads = async (req, res) => {
       filters.status = normalizedStatus;
     }
 
-    if (assignedTo) {
-      filters.assignedTo = String(assignedTo).trim();
+    if (assignedToId) {
+      filters.assignedToId = Number(assignedToId);
     }
 
     if (search) {
@@ -47,7 +48,7 @@ const createLead = async (req, res) => {
     const status = LEAD_STATUSES.has(rawStatus) ? rawStatus : "new";
     const message = req.body.message ? String(req.body.message).trim() : null;
 
-    await leadModel.upsertLead(
+    const leadId = await leadModel.upsertLead(
       {
         phone,
         name,
@@ -59,7 +60,8 @@ const createLead = async (req, res) => {
       { source: "manual_api", body: req.body }
     );
 
-    const lead = await leadModel.findLeadByPhone(phone);
+    const lead = await leadModel.getLeadById(leadId);
+    emitToAll("lead_updated", lead); // Notify UI
     return res.status(201).json(lead);
   } catch (error) {
     console.error("Failed to create lead:", error);
@@ -67,12 +69,17 @@ const createLead = async (req, res) => {
   }
 };
 
+const activityModel = require("../models/activityModel");
+
 const updateLead = async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id <= 0) {
       return res.status(400).json({ error: "Invalid lead id" });
     }
+
+    const oldLead = await leadModel.getLeadById(id);
+    if (!oldLead) return res.status(404).json({ error: "Lead not found" });
 
     const updates = [];
     const params = [];
@@ -90,11 +97,23 @@ const updateLead = async (req, res) => {
       }
       updates.push("status = ?");
       params.push(normalizedStatus);
+      
+      if (normalizedStatus !== oldLead.status) {
+        await activityModel.logActivity({
+          leadId: id,
+          actorId: req.user.id,
+          type: 'status_change',
+          description: `Changed status from ${oldLead.status} to ${normalizedStatus}`,
+          oldValue: oldLead.status,
+          newValue: normalizedStatus
+        });
+      }
     }
 
-    if ("assignedTo" in body) {
-      updates.push("assigned_to = ?");
-      params.push(body.assignedTo ? String(body.assignedTo).trim() : null);
+    if ("assignedToId" in body) {
+      updates.push("assigned_to_id = ?");
+      params.push(body.assignedToId ? Number(body.assignedToId) : null);
+      // Logic for assignment tracking could go here
     }
 
     if ("notes" in body) {
@@ -112,6 +131,16 @@ const updateLead = async (req, res) => {
       params.push(
         body.lastCallOutcome ? String(body.lastCallOutcome).trim() : null
       );
+      
+      if (body.lastCallOutcome && body.lastCallOutcome !== oldLead.last_call_outcome) {
+        await activityModel.logActivity({
+          leadId: id,
+          actorId: req.user.id,
+          type: 'call_log',
+          description: `Logged call outcome: ${body.lastCallOutcome}`,
+          newValue: body.lastCallOutcome
+        });
+      }
     }
 
     if (body.markCalled === true) {
@@ -128,10 +157,22 @@ const updateLead = async (req, res) => {
     }
 
     const updatedLead = await leadModel.getLeadById(id);
+    emitToAll("lead_updated", updatedLead); // Notify UI
     return res.json(updatedLead);
   } catch (error) {
     console.error("Failed to update lead:", error);
     return res.status(500).json({ error: "Failed to update lead" });
+  }
+};
+
+const getActivityHistory = async (req, res) => {
+  try {
+    const leadId = Number(req.params.id);
+    const activities = await activityModel.getActivitiesByLead(leadId);
+    res.json(activities);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch activities" });
   }
 };
 
@@ -144,4 +185,5 @@ module.exports = {
   createLead,
   updateLead,
   getStatuses,
+  getActivityHistory,
 };
